@@ -1,0 +1,276 @@
+import requests
+import Levenshtein
+
+
+# 使用HTTP封装的GPT-3.5接口，请根据具体接口情况替换
+def gpt3_5(msg):
+    # 设置请求头
+    headers = {"Content-type": "application/json"}
+    url = 'http://localhost:8080/cgpt-api/push_question'
+    data = {
+        "ask_str": msg,
+    }
+
+    response = requests.post(url, json=data, headers=headers)
+    return response.json()['data']['content']
+
+
+def example_list():
+    ex_list = [{
+        'qa': '女性高管任职的上市公司有多少家？',
+        'cypher': '''
+            CALL c2(
+	            '
+                MATCH (gg:高管)-[:性别]->(:性别)-[:别名]->(xb:性别_别名) 
+                WHERE xb.value=$xb 
+                RETURN COLLECT(gg.md5) AS gg_md5;
+                ',
+            {xb:'女性'}
+            ) YIELD value WITH value.gg_md5 AS gg_md5
+            CALL c1(
+	            '
+                MATCH (stk:股票)<-[:任职于]-(gg:高管) 
+                WHERE gg.md5 IN $gg_md5 
+                RETURN COUNT(DISTINCT stk) AS count;
+                ',
+                {gg_md5:gg_md5}
+            ) YIELD value RETURN value.count AS count;
+        '''
+    }, {
+        'qa': '上市公司女性高管比例是多少？',
+        'cypher': '''
+            CALL c2(
+	            '
+                MATCH (gg:高管)-[:性别]->(:性别)-[:别名]->(xb:性别_别名) 
+                WHERE xb.value=$xb 
+                RETURN COUNT(gg) AS v_ct;
+                ',
+                {xb:'女性'}
+            ) YIELD value WITH value.v_ct AS v_ct
+            CALL c2(
+	            '
+                MATCH (gg:高管)
+                WITH COUNT(gg) AS t_ct
+                RETURN TOFLOAT(apoc.number.exact.div(TOSTRING($v_ct),TOSTRING(t_ct),3,$mk_half)) AS val
+                ',
+                {v_ct:v_ct,mk_half:'HALF_DOWN'}
+            ) YIELD value RETURN value.val AS val;
+        '''
+    }, {
+        'qa': '北京的上市公司中有多少位女性高管？',
+        'cypher': '''
+            CALL c2(
+	            '
+                MATCH (gg:高管)-[:性别]->(:性别)-[:别名]->(xb:性别_别名) 
+                WHERE xb.value=$xb 
+                RETURN COLLECT(gg.md5) AS gg_md5;
+                ',
+                {xb:'女性'}
+            ) YIELD value WITH value.gg_md5 AS gg_md5
+            CALL c1(
+	            '
+                MATCH (dy:地域)<-[:地域]-(stk:股票)<-[:任职于]-(gg:高管) 
+                WHERE gg.md5 IN $gg_md5 AND dy.value=$dy
+                RETURN COUNT(DISTINCT stk) AS count;
+                ',
+                {dy:'北京',gg_md5:gg_md5}
+            ) YIELD value RETURN value.count AS count;
+        '''
+    }, {
+        'qa': '软件服务行业硕士学历的女性高管有多少位？',
+        'cypher': '''
+            CALL c2(
+	            '
+                MATCH (xl:学历)<-[:学历]-(gg:高管)-[:性别]->(:性别)-[:别名]->(xb:性别_别名) 
+                WHERE xb.value=$xb AND xl.value=$xl 
+                RETURN COLLECT(gg.md5) AS gg_md5;
+                ',
+                {xb:'女性',xl:'硕士'}
+            ) YIELD value WITH value.gg_md5 AS gg_md5
+            CALL c1(
+	            '
+                MATCH (hy:行业)<-[:所属行业]-(stk:股票)<-[:任职于]-(gg:高管) 
+                WHERE gg.md5 IN $gg_md5 AND hy.value=$hy
+                RETURN COUNT(DISTINCT stk) AS count;
+                ',
+                {hy:'软件服务',gg_md5:gg_md5}
+            ) YIELD value RETURN value.count AS count;
+        '''
+    }, {
+        'qa': '在海南由博士学历的男性高管任职的上市公司，都属于哪些行业？',
+        'cypher': '''
+            CALL c2(
+	            '
+                MATCH (xl:学历)<-[:学历]-(gg:高管)-[:性别]->(:性别)-[:别名]->(xb:性别_别名) 
+                WHERE xb.value=$xb AND xl.value=$xl 
+                RETURN COLLECT(gg.md5) AS gg_md5;
+                ',
+                {xb:'男性',xl:'博士'}
+            ) YIELD value WITH value.gg_md5 AS gg_md5
+            CALL c1(
+	            '
+                MATCH (hy:行业)<-[:所属行业]-(stk:股票)<-[:任职于]-(gg:高管),
+                	  (dy:地域)<-[:地域]-(stk)
+                WHERE gg.md5 IN $gg_md5 AND dy.value=$dy
+                RETURN DISTINCT hy.value AS hy;
+                ',
+                {dy:'海南',gg_md5:gg_md5}
+            ) YIELD value RETURN value.hy AS hy;
+        '''
+    }]
+    return ex_list
+
+
+def examples(ask):
+    examples_str = ''
+    examples_list = []
+    for index, map in enumerate(example_list()):
+        qa = map['qa']
+        cypher = map['cypher']
+        dis = Levenshtein.distance(ask, qa)
+        examples_list.append({'qa': qa, 'cypher': cypher, 'dis': dis})
+
+    sorted_list = sorted(examples_list, key=lambda map: map['dis'])
+
+    for map in sorted_list:
+        qa = map['qa']
+        cypher = map['cypher']
+        ex = f'''
+          # {qa}
+          {cypher}
+          '''
+        # `prompt(ask)` Prompt Length 300
+        if len(examples_str + ex) + 300 <= 2048:
+            examples_str += ex
+
+    return examples_str
+
+
+def prompt(ask):
+    return f"""
+        您是一名助手，能够根据示例Cypher查询生成Cypher查询。
+        示例Cypher查询有：\n {examples(ask)} \n
+        除了Cypher查询之外，不要回复任何解释或任何其他信息。
+        您永远不要为你的不准确回复感到抱歉，并严格根据提供的cypher示例生成cypher语句。
+        不要提供任何无法从Cypher示例中推断出的Cypher语句。
+        当由于缺少对话上下文而无法推断密码语句时，通知用户，并说明缺少的上下文是什么。
+        现在请为这个查询生成Cypher:
+        # {ask}
+        """
+
+
+if __name__ == '__main__':
+    # 输入问题
+    ask = '在北京由硕士学历的女性高管任职的上市公司，都属于哪些行业？'
+
+    # This model's maximum context length is 4097 tokens.
+    # However, you requested 4364 tokens (2316 in the messages, 2048 in the completion).
+    # Please reduce the length of the messages or completion.
+    print(gpt3_5(prompt(ask)))
+
+
+# Test Result:
+
+# QA:你好
+# RE-GPT3.5（正确生成）:无法根据示例Cypher查询推断出生成Cypher查询的特定上下文。请提供更具体的问题或信息。
+
+# QA:男性高管任职的上市公司有多少家？
+# RE-GPT3.5（正确生成）:
+#     CALL c2(
+#         '
+#         MATCH (gg:高管)-[:性别]->(:性别)-[:别名]->(xb:性别_别名)
+#         WHERE xb.value=$xb
+#         RETURN COLLECT(gg.md5) AS gg_md5;
+#         ',
+#         {xb:'男性'}
+#     ) YIELD value WITH value.gg_md5 AS gg_md5
+#     CALL c1(
+#         '
+#         MATCH (stk:股票)<-[:任职于]-(gg:高管)
+#         WHERE gg.md5 IN $gg_md5
+#         RETURN COUNT(DISTINCT stk) AS count;
+#         ',
+#         {gg_md5:gg_md5}
+#     ) YIELD value RETURN value.count AS count;
+
+
+# QA:上市公司男性高管比例是多少？
+# RE-GPT3.5（正确生成）:
+#      CALL c2(
+#          '
+#          MATCH (gg:高管)-[:性别]->(:性别)-[:别名]->(xb:性别_别名)
+#          WHERE xb.value=$xb
+#          RETURN COUNT(gg) AS v_ct;
+#          ',
+#          {xb:'男性'}
+#      ) YIELD value WITH value.v_ct AS v_ct
+#      CALL c2(
+#          '
+#          MATCH (gg:高管)
+#          WITH COUNT(gg) AS t_ct
+#          RETURN TOFLOAT(apoc.number.exact.div(TOSTRING($v_ct),TOSTRING(t_ct),3,$mk_half)) AS val
+#          ',
+#          {v_ct:v_ct,mk_half:'HALF_DOWN'}
+#      ) YIELD value RETURN value.val AS val;
+
+
+# QA:上海的上市公司中有多少位男性高管？
+# RE-GPT3.5（正确生成）:
+#     CALL c2(
+#         '
+#         MATCH (gg:高管)-[:性别]->(:性别)-[:别名]->(xb:性别_别名)
+#         WHERE xb.value=$xb
+#         RETURN COLLECT(gg.md5) AS gg_md5;
+#         ',
+#         {xb:'男性'}
+#     ) YIELD value WITH value.gg_md5 AS gg_md5
+#     CALL c1(
+#         '
+#         MATCH (dy:地域)<-[:地域]-(stk:股票)<-[:任职于]-(gg:高管)
+#         WHERE gg.md5 IN $gg_md5 AND dy.value=$dy
+#         RETURN COUNT(DISTINCT stk) AS count;
+#         ',
+#         {dy:'上海',gg_md5:gg_md5}
+#     ) YIELD value RETURN value.count AS count;
+
+
+# QA:水泥行业博士学历的男性高管有多少位？
+# RE-GPT3.5:
+#     CALL c2(
+#         '
+#         MATCH (xl:学历)<-[:学历]-(gg:高管)-[:性别]->(:性别)-[:别名]->(xb:性别_别名)
+#         WHERE xb.value=$xb AND xl.value=$xl
+#         RETURN COLLECT(gg.md5) AS gg_md5;
+#         ',
+#         {xb:'男性',xl:'博士'}
+#     ) YIELD value WITH value.gg_md5 AS gg_md5
+#     CALL c1(
+#         '
+#         MATCH (hy:行业)<-[:所属行业]-(stk:股票)<-[:任职于]-(gg:高管)
+#         WHERE gg.md5 IN $gg_md5 AND hy.value=$hy
+#         RETURN COUNT(DISTINCT gg) AS count;
+#         ',
+#         {hy:'水泥',gg_md5:gg_md5}
+#     ) YIELD value RETURN value.count AS count;
+
+
+# QA:在北京由硕士学历的女性高管任职的上市公司，都属于哪些行业？
+# RE-GPT3.5:
+#     CALL c2(
+#         '
+#         MATCH (xl:学历)<-[:学历]-(gg:高管)-[:性别]->(:性别)-[:别名]->(xb:性别_别名)
+#         WHERE xb.value=$xb AND xl.value=$xl
+#         RETURN COLLECT(gg.md5) AS gg_md5;
+#         ',
+#         {xb:'女性',xl:'硕士'}
+#     ) YIELD value WITH value.gg_md5 AS gg_md5
+#     CALL c1(
+#         '
+#         MATCH (hy:行业)<-[:所属行业]-(stk:股票)<-[:任职于]-(gg:高管),
+#               (dy:地域)<-[:地域]-(stk)
+#         WHERE gg.md5 IN $gg_md5 AND dy.value=$dy
+#         RETURN DISTINCT hy.value AS hy;
+#         ',
+#         {dy:'北京',gg_md5:gg_md5}
+#     ) YIELD value RETURN value.hy AS hy;
+
