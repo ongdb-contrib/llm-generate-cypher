@@ -5,7 +5,7 @@ import json
 
 # 使用HTTP封装的ChatGLM接口，请根据具体接口情况替换
 def chatglm(msg):
-    url = "https://localhost/llm/chatglm/chat"
+    url = "https://localhost:8080/llm/chatglm/chat"
     payload = json.dumps({
         "query": msg,
         "history": [],
